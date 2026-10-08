@@ -41,7 +41,9 @@ models:
     output_cost_per_1m: 0
   local-medium:
     provider: ollama
-    model: "llama3.1:8b"
+    # Intended: "llama3.1:8b". Temporarily pointed at qwen2.5:3b because the dev
+    # machine had < 10 GB of free RAM; switch back once an 8B model fits.
+    model: "qwen2.5:3b"
     input_cost_per_1m: 0
     output_cost_per_1m: 0
   claude-fast:

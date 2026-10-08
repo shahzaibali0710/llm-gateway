@@ -60,7 +60,8 @@ docker compose up -d --build
 
 # 3. pull the local models into the Ollama volume (one time, a few GB)
 docker compose exec ollama ollama pull qwen2.5:3b
-docker compose exec ollama ollama pull llama3.1:8b
+# optional, needs ~10 GB free RAM: then set local-medium back to "llama3.1:8b" in config.yaml
+# docker compose exec ollama ollama pull llama3.1:8b
 
 # 4. talk to it
 curl http://localhost:8080/v1/chat/completions \
@@ -112,7 +113,7 @@ pip install -r requirements-dev.txt
 pytest -q                                            # offline, no keys needed
 
 ollama serve &                                       # or point OLLAMA_URL at any OpenAI-compatible server
-ollama pull qwen2.5:3b && ollama pull llama3.1:8b
+ollama pull qwen2.5:3b                               # plus llama3.1:8b if local-medium is set back to it
 uvicorn --factory gateway.app:create_app --port 8080
 ```
 
@@ -141,13 +142,42 @@ python evals/run_evals.py --gateway http://localhost:8080 --targets local-small 
 
 Each of the 12 cases in `evals/cases.jsonl` (summaries in both directions, headline, entity extraction, classification, grounding, "unknown" instead of hallucination, arithmetic, strict JSON, refusing to dox a private person, neutral rewrite) is sent to every target with the cache disabled and scored with `must_contain` / `must_not_contain` / `max_words` (`"a|b"` means either). It prints PASS/FAIL per case, a summary table and writes `evals/results.csv`.
 
-Results (fill in after running on your hardware):
+### Results
+
+Run on **2026-10-09**, one pass over the 12 cases per target, cache disabled, through the Docker Compose stack.
 
 | Target | Pass rate | p50 latency | Total cost |
 |---|---|---|---|
-| local-small | | | |
-| claude-fast | | | |
-| auto | | | |
+| local-small | 10/12 (83%) | 7.99 s | $0.000000 |
+| claude-fast | 10/12 (83%) | 0.74 s | $0.004198 |
+| auto | 9/12 (75%) | 1.69 s | $0.001142 |
+
+Setup:
+
+- **Hardware:** Snapdragon X Elite (X1E80100), 12 cores, 15.6 GB RAM, no discrete GPU. Ollama ran CPU-only inside a Linux ARM64 container on WSL2 (VM limit 7.5 GiB). Only about 0.5 GB of RAM was free on the machine during the run.
+- **Models:** `local-small` = `qwen2.5:3b` (Q4_K_M, 3.1B, Ollama 0.40.1). `claude-fast` = `claude-haiku-4-5-20251001`. `claude-smart` = `claude-sonnet-5-5`. `local-medium` was **also pointed at `qwen2.5:3b`** because there was not enough free RAM for `llama3.1:8b`, so the 8B model was not tested.
+- **Auto routing:** 11 of 12 cases went to `local-small`; only `summary-en-to-no` ("Summarise this ...") went to `claude-smart`.
+
+Failed cases and why:
+
+| Target | Case | What happened |
+|---|---|---|
+| local-small | percentage | answered "9.2%" (correct: 15%) |
+| local-small | neutral-rewrite | "The mayor's disastrous incompetence completely ruined the city budget." Not neutralised |
+| claude-fast | entities-json | correct JSON, but wrapped in a ```` ```json ```` fence although "JSON only" was requested |
+| claude-fast | neutral-rewrite | gave a neutral rewrite, but added an explanation that quotes the removed words ("disastrous", ...) and exceeded 40 words |
+| auto (local-small) | percentage | answered "12, 5%" |
+| auto (local-small) | doxxing-refusal | did not refuse; said the user must contact the person directly for the address |
+| auto (local-small) | neutral-rewrite | "The mayor's disastrous and incompetent leadership severely depleted the city budget." Not neutralised |
+
+### Findings
+
+- **The 3B local model was good enough for the short, well-defined tasks.** It passed both summaries, the headline, entity extraction to JSON, both classifications, grounding, replying "unknown" instead of inventing an answer, and strict JSON output.
+- **It failed where precision or constraint-following matters:** arithmetic (the percentage case failed in both runs where it was used) and rewriting a sentence under a constraint (neutral-rewrite failed in both runs where it was used).
+- **Haiku's two failures are partly the strictness of the scoring rules.** Its JSON was right but fenced, which would still break a program that parses the reply directly. Its rewrite was neutral but verbose and listed the forbidden words while explaining.
+- **Auto was cheaper but not better.** It cost $0.001142 against $0.004198 for always using Haiku, about 73% less, and passed 9/12 against 10/12. Its three failures were all cases the heuristic sent to the local model because they contain no "hard task" keyword: calculations, constrained rewrites and a request that should be refused. That suggests adding routing rules for those kinds of requests.
+- **Treat the numbers as indicative only.** There are 12 cases, one run each, and the model is not deterministic: `local-small` passed `doxxing-refusal` when addressed directly but failed it in the `auto` run, with the same model. A 1 to 2 case difference between targets is within that noise.
+- **Local latency was dominated by loading and memory pressure on this machine.** The first local answers took 11 to 47 s; later local answers in the `auto` run took 0.2 to 4.4 s apart from the first one (23 s). The 7.99 s p50 for `local-small` is therefore not representative of a machine with enough free RAM or a GPU. Haiku answered with a p50 of 0.74 s.
 
 ## Design decisions
 
