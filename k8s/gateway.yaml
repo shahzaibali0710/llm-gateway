@@ -1,0 +1,128 @@
+# llm-gateway on Kubernetes. Local try-out with kind:
+#
+#   kind create cluster --name llm-gateway
+#   docker build -t llm-gateway:latest .
+#   kind load docker-image llm-gateway:latest --name llm-gateway
+#   kubectl apply -f k8s/ollama.yaml -f k8s/gateway.yaml
+#   kubectl create secret generic gateway-secrets --from-literal=ANTHROPIC_API_KEY=sk-ant-...   # optional
+#   kubectl rollout restart deploy/gateway                                                       # after creating the secret
+#   kubectl port-forward svc/gateway 8080:80
+#   curl localhost:8080/healthz
+#
+# The ConfigMap below mirrors config.yaml (with Ollama at its in-cluster
+# address). Keep the two in sync, and replace the dev API keys.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gateway-config
+data:
+  config.yaml: |
+    api_keys:
+      newsroom-dev-key: newsroom
+      product-dev-key: product
+      datascience-dev-key: data-science
+    providers:
+      ollama:
+        type: ollama
+        base_url: http://ollama:11434
+        timeout_s: 120
+      anthropic:
+        type: anthropic
+        base_url: https://api.anthropic.com
+        api_key_env: ANTHROPIC_API_KEY
+        timeout_s: 60
+    # Prices: https://platform.claude.com/docs/en/about-claude/pricing
+    models:
+      local-small:  {provider: ollama,    model: "qwen2.5:3b",                input_cost_per_1m: 0,    output_cost_per_1m: 0}
+      local-medium: {provider: ollama,    model: "llama3.1:8b",               input_cost_per_1m: 0,    output_cost_per_1m: 0}
+      claude-fast:  {provider: anthropic, model: "claude-haiku-4-5-20251001", input_cost_per_1m: 1.00, output_cost_per_1m: 5.00}
+      claude-smart: {provider: anthropic, model: "claude-sonnet-5-5",         input_cost_per_1m: 2.00, output_cost_per_1m: 10.00}
+    routes:
+      simple: [local-small, claude-fast]
+      complex: [claude-smart, local-medium]
+      local-only: [local-medium, local-small]
+    autoroute:
+      complex_context_chars: 4000
+      complex_turn_chars: 600
+    guardrails:
+      max_input_chars: 20000
+      blocked_patterns:
+        - '(?i)ignore\s+(?:all|previous|prior)(?:\s+(?:all|previous|prior))*\s+instructions'
+        - '(?i)disregard\s+(?:all|previous|your)\s+(?:instructions|rules)'
+        - '(?i)reveal\s+(?:your|the)\s+system\s+prompt'
+    cache:
+      enabled: true
+      ttl_seconds: 300
+      max_entries: 1000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  labels: {app: gateway}
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: gateway}
+  template:
+    metadata:
+      labels: {app: gateway}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: /metrics
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: gateway
+          image: llm-gateway:latest
+          imagePullPolicy: IfNotPresent  # image is loaded into kind; use a registry image elsewhere
+          ports:
+            - containerPort: 8080
+          env:
+            - name: GATEWAY_CONFIG
+              value: /etc/gateway/config.yaml
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: gateway-secrets
+                  key: ANTHROPIC_API_KEY
+                  optional: true  # without it the Claude models fail and chains fall back to local
+          readinessProbe:
+            httpGet: {path: /healthz, port: 8080}
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: 8080}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: config, mountPath: /etc/gateway, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: config
+          configMap: {name: gateway-config}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+  labels: {app: gateway}
+spec:
+  selector: {app: gateway}
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080

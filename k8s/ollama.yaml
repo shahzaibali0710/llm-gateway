@@ -1,0 +1,52 @@
+# Ollama for the gateway's local models. Apply before (or together with) gateway.yaml.
+#
+#   kubectl apply -f k8s/ollama.yaml
+#   kubectl exec deploy/ollama -- ollama pull qwen2.5:3b
+#   kubectl exec deploy/ollama -- ollama pull llama3.1:8b
+#
+# To serve with vLLM on GPU nodes instead: replace the image with
+# vllm/vllm-openai, add `resources.limits."nvidia.com/gpu": 1`, start it with
+# `--model <hf-model-id>` on port 8000, and change the Service port and the
+# `ollama.base_url` in the gateway ConfigMap to http://ollama:8000.
+# The gateway talks OpenAI-compatible /v1/chat/completions, so nothing else changes.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ollama
+  labels: {app: ollama}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: ollama}
+  template:
+    metadata:
+      labels: {app: ollama}
+    spec:
+      containers:
+        - name: ollama
+          image: ollama/ollama:latest
+          ports:
+            - containerPort: 11434
+          readinessProbe:
+            httpGet: {path: /, port: 11434}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests: {cpu: "1", memory: 6Gi}
+            limits: {memory: 12Gi}
+          volumeMounts:
+            - name: models
+              mountPath: /root/.ollama
+      volumes:
+        - name: models
+          emptyDir: {}  # models are re-pulled on restart; use a PersistentVolumeClaim in real clusters
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ollama
+spec:
+  selector: {app: ollama}
+  ports:
+    - port: 11434
+      targetPort: 11434

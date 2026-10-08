@@ -1,0 +1,31 @@
+groups:
+  - name: llm-gateway
+    rules:
+      - alert: HighFallbackRate
+        expr: sum(rate(gateway_fallbacks_total[10m])) / sum(rate(gateway_requests_total[10m])) > 0.2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 20% of requests needed a fallback model"
+          description: "A primary model is failing or timing out. Check the provider and the gateway logs."
+
+      - alert: TeamSpendHigh
+        expr: sum by (team) (increase(gateway_cost_usd_total[24h])) > 5
+        labels:
+          severity: warning
+        annotations:
+          summary: "Team {{ $labels.team }} spent more than $5 in 24h"
+          description: "Spend over the last 24h is ${{ $value | printf \"%.2f\" }}."
+
+      - alert: LocalModelSlow
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le, model) (rate(gateway_latency_seconds_bucket{model=~"local-.*"}[5m]))
+          ) > 8
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "p95 latency of {{ $labels.model }} is above 8s"
+          description: "The local model is slow; consider a smaller model or a GPU node."

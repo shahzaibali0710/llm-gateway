@@ -1,0 +1,84 @@
+# llm-gateway configuration.
+# ${VAR} / ${VAR:-default} are expanded from the environment.
+
+# --- Authentication ---------------------------------------------------------
+# API key -> team name. These are DEV keys: replace them (or mount your own
+# config from a Secret) before exposing the gateway to anyone.
+api_keys:
+  newsroom-dev-key: newsroom
+  product-dev-key: product
+  datascience-dev-key: data-science
+
+# --- Providers --------------------------------------------------------------
+providers:
+  # Ollama's OpenAI-compatible API. For vLLM or SGLang, only base_url changes
+  # (e.g. http://vllm:8000), the gateway speaks /v1/chat/completions either way.
+  ollama:
+    type: ollama
+    base_url: ${OLLAMA_URL:-http://localhost:11434}
+    timeout_s: 120
+  # Anthropic Messages API; the key is read from the environment at call time.
+  anthropic:
+    type: anthropic
+    base_url: https://api.anthropic.com
+    api_key_env: ANTHROPIC_API_KEY
+    timeout_s: 60
+  # Offline deterministic echo provider, used by the tests.
+  mock:
+    type: mock
+
+# --- Models -----------------------------------------------------------------
+# Costs are USD per 1M tokens. Local models cost nothing per token (hardware
+# and power are not modelled).
+# Anthropic prices: https://platform.claude.com/docs/en/about-claude/pricing
+# (checked 2026-10-08: Haiku 4.5 $1 in / $5 out, Sonnet 5.5 $2 in / $10 out
+# per MTok. Prices change; re-check before relying on cost numbers.)
+models:
+  local-small:
+    provider: ollama
+    model: "qwen2.5:3b"
+    input_cost_per_1m: 0
+    output_cost_per_1m: 0
+  local-medium:
+    provider: ollama
+    model: "llama3.1:8b"
+    input_cost_per_1m: 0
+    output_cost_per_1m: 0
+  claude-fast:
+    provider: anthropic
+    model: "claude-haiku-4-5-20251001"
+    input_cost_per_1m: 1.00
+    output_cost_per_1m: 5.00
+  claude-smart:
+    provider: anthropic
+    model: "claude-sonnet-5-5"
+    input_cost_per_1m: 2.00
+    output_cost_per_1m: 10.00
+
+# --- Routes -----------------------------------------------------------------
+# Ordered fallback chains: the first model is tried first, the next on failure.
+# Every model name above is also addressable directly as a one-model route.
+routes:
+  simple: [local-small, claude-fast]
+  complex: [claude-smart, local-medium]
+  # Unpublished articles never leave the cluster: local models only.
+  local-only: [local-medium, local-small]
+
+# --- Auto-router (model: "auto") -----------------------------------------------
+autoroute:
+  complex_context_chars: 4000   # total prompt size above which a request is "complex"
+  complex_turn_chars: 600       # latest user turn size above which it is "complex"
+
+# --- Guardrails -------------------------------------------------------------
+guardrails:
+  max_input_chars: 20000
+  blocked_patterns:
+    - '(?i)ignore\s+(?:all|previous|prior)(?:\s+(?:all|previous|prior))*\s+instructions'
+    - '(?i)disregard\s+(?:all|previous|your)\s+(?:instructions|rules)'
+    - '(?i)reveal\s+(?:your|the)\s+system\s+prompt'
+
+# --- Cache ------------------------------------------------------------------
+cache:
+  enabled: true
+  ttl_seconds: 300
+  max_entries: 1000
