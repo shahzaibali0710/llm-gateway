@@ -52,7 +52,7 @@ The demo scenario is a Norwegian newsroom with three teams (`newsroom`, `product
 Prerequisites: Docker Desktop (WSL2 backend on Windows).
 
 ```bash
-# 1. (optional) enable the hosted Claude models; without a key those fall back to local models
+# 1. (optional) enable the hosted Claude models; without a key, simple/complex fall back to local models and the sensitive route returns 502
 export ANTHROPIC_API_KEY=sk-ant-...        # PowerShell: $env:ANTHROPIC_API_KEY = "sk-ant-..."
 
 # 2. start everything
