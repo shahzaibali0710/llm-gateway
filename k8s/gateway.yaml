@@ -41,6 +41,7 @@ data:
       simple: [local-small, claude-fast]
       complex: [claude-smart, local-medium]
       local-only: [local-medium, local-small]
+      sensitive: [claude-smart]   # fail closed: no local fallback
     autoroute:
       complex_context_chars: 4000
       complex_turn_chars: 600

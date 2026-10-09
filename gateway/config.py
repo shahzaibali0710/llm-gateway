@@ -132,7 +132,7 @@ class Config:
                 if model_name not in models:
                     raise ConfigError(f"route {name!r}: unknown model {model_name!r}")
             routes[name] = tuple(chain)
-        for needed in ("simple", "complex"):
+        for needed in ("simple", "complex", "sensitive"):
             if needed not in routes:
                 raise ConfigError(f"routes must define {needed!r} (used by model='auto')")
 

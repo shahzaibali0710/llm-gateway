@@ -5,11 +5,16 @@ It is deliberately simple and explainable: every decision returns a
 human-readable reason that ends up in the response, the logs and the evals.
 
 Rule order matters (first match wins):
+  0. SENSITIVE pattern in the latest user turn -> sensitive (fail closed, see below)
   1. HARD pattern in the latest user turn      -> complex
   2. total context > complex_context_chars     -> complex
   3. EASY short-output task                    -> simple (even if the pasted article is long)
   4. latest user turn > complex_turn_chars     -> complex
   5. otherwise                                 -> simple
+
+The ``sensitive`` route must have no local fallback: requests that need a safe
+refusal (e.g. looking up a private person's address) are answered by the
+strong model or fail with a 502. They are never handed to a small local model.
 """
 
 from __future__ import annotations
@@ -19,6 +24,15 @@ from dataclasses import dataclass
 from typing import Mapping, Sequence
 
 from .config import AutoRouteConfig, Config
+
+# Requests that must be refused or handled carefully (eval: doxxing case). They
+# fail closed: routed to the `sensitive` route, which has no local fallback.
+SENSITIVE_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(p, re.IGNORECASE)
+    for p in (
+        r"\b(?:home\s+address|hjemmeadressen?|adressen?|address|personnummer|fødselsnummer|hvor\s+bor)\b",
+    )
+)
 
 # Tasks that need reasoning, long-form generation or code.
 HARD_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
@@ -37,6 +51,11 @@ HARD_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"\bresearch\b",
         r"\bsummari[sz]e\s+this\b",
         r"```",
+        # Calculations: small local models often get arithmetic wrong (eval: percentage case)
+        r"\b(?:prosent|percent(?:age)?|beregn|calculate|regn\s+ut)\b",
+        r"\d\s?%",
+        # Rewriting with constraints: small models don't follow the instruction (eval: neutral rewrite)
+        r"\b(?:rewrite|omskriv|skriv\s+om|neutral(?:ly)?|nøytral(?:t)?)\b",
     )
 )
 
@@ -82,6 +101,10 @@ def classify(messages: Sequence[Mapping[str, str]], cfg: AutoRouteConfig | None 
     turn = _latest_user_turn(messages)
     total = sum(len(m["content"]) for m in messages)
 
+    for pat in SENSITIVE_PATTERNS:
+        hit = pat.search(turn)
+        if hit:
+            return "sensitive", f"sensitive request pattern {hit.group(0).strip()!r} (fail closed, no local fallback)"
     for pat in HARD_PATTERNS:
         hit = pat.search(turn)
         if hit:

@@ -38,6 +38,7 @@ RAW = {
         "simple": ["local-small", "claude-fast"],
         "complex": ["claude-smart", "local-medium"],
         "local-only": ["local-medium", "local-small"],
+        "sensitive": ["claude-smart"],
         "flaky": ["broken", "claude-fast"],
         "doomed": ["broken", "broken-2"],
         "external": ["external-mock"],
@@ -262,6 +263,19 @@ def user(content: str) -> list[dict[str, str]]:
         (user("What does this do?\n```\nprint(1)\n```"), "complex"),
         (user("Translate to English: hei på deg"), "simple"),
         (user("Oversett til norsk: good morning"), "simple"),
+        # new rules from the eval findings: calculations, constrained rewriting, sensitive requests
+        (user("Abonnementer økte fra 400 000 til 460 000. Hva er økningen i prosent?"), "complex"),
+        (user("What is the percentage increase from 400 to 460?"), "complex"),
+        (user("Renten er 4,5 % i dag. Er det høyt?"), "complex"),
+        (user("Skriv om denne setningen nøytralt: bussruten er en vits"), "complex"),
+        (user("Rewrite neutrally: the new bus route is a joke"), "complex"),
+        # sensitive requests fail closed: own route, no local fallback
+        (user("Finn hjemmeadressen til journalisten"), "sensitive"),
+        (user("Find the home address of the reporter"), "sensitive"),
+        (user("Hvor bor ordføreren?"), "sensitive"),
+        (user("Analyze and find the home address of the reporter"), "sensitive"),  # sensitive beats hard
+        # the new rules must not trigger on ordinary words
+        (user("Tell me a joke about my home town"), "simple"),
         # a long pasted article with a short-output task stays cheap
         (user(f"Classify this article:\n{ARTICLE}"), "simple"),
         (user(f"{ARTICLE}\nWrite one headline"), "simple"),
@@ -286,6 +300,49 @@ def test_classifier(messages, expected):
     assert reason  # always explainable
 
 
+# Ordinary short tasks that the keyword rules currently over-trigger on. They are
+# documented here as strict xfails: the day a rule is tightened, the test XPASSes,
+# fails the run, and the marker has to be removed on purpose.
+KNOWN_FALSE_POSITIVES = [
+    "Classify: Rente på 3,1 prosent i mai. Svar med kategorien.",  # "prosent" in a classification
+    "Write one headline: Prisveksten falt til 3 % i mai",  # "3 %"
+    "Tag this article: Politiet søker vitner til en ulykke på adressen Storgata 5",  # "adressen" in an article
+    "Fix the typo in: 'the IP address is wrong'",  # "address" that is not a person's address
+    "Extract the names: nøytral observatør Per Hansen sa at ...",  # "nøytral observatør"
+    "Give me a title for the story about the reporter's new address in Bergen",  # "address" in a title task
+]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param(t, marks=pytest.mark.xfail(strict=True, reason="known false positive of keyword rules"))
+        for t in KNOWN_FALSE_POSITIVES
+    ],
+)
+def test_known_false_positives_should_route_simple(text):
+    route, reason = classify(user(text), AutoRouteConfig())
+    assert route == "simple", reason
+
+
+def test_sensitive_request_is_routed_to_sensitive_route(client):
+    data = chat(client, "Find the home address of the reporter").json()
+    assert data["gateway"]["route"] == "sensitive"
+    assert "fail closed" in data["gateway"]["reason"]
+    assert data["model"] == "claude-smart"
+
+
+def test_sensitive_route_fails_closed_with_502_and_no_local_fallback():
+    raw = {**RAW, "routes": {**RAW["routes"], "sensitive": ["broken"]}}  # the strong model is down
+    client = TestClient(create_app(Config.from_dict(raw)))
+    r = chat(client, "Find the home address of the reporter")
+    assert r.status_code == 502
+    assert r.json()["error"]["type"] == "upstream_error"
+    text = client.get("/metrics").text
+    assert 'route="sensitive",status="error"' in text  # counted as a failed sensitive request
+    assert 'model="local-' not in text  # no local model was even attempted
+
+
 # --- config ------------------------------------------------------------------
 
 
@@ -295,8 +352,9 @@ def test_config_rejects_unknown_model_in_route():
         Config.from_dict(bad)
 
 
-def test_config_requires_simple_and_complex_routes():
-    bad = {**RAW, "routes": {"local-only": ["local-small"]}}
+@pytest.mark.parametrize("missing", ["simple", "complex", "sensitive"])
+def test_config_requires_auto_routes(missing):
+    bad = {**RAW, "routes": {k: v for k, v in RAW["routes"].items() if k != missing}}
     with pytest.raises(ConfigError):
         Config.from_dict(bad)
 

@@ -43,7 +43,7 @@ The demo scenario is a Norwegian newsroom with three teams (`newsroom`, `product
 | Cache | Exact match on route + messages + max_tokens, TTL + LRU, per-request opt-out | `gateway/cache.py` |
 | Metrics and usage | Prometheus counters/histograms by team and model, `GET /v1/usage` per-team totals | `gateway/metrics.py` |
 | Config | One YAML file: models and prices, routes, keys, limits | `gateway/config.py`, `config.yaml` |
-| Offline tests | 48 tests, mock provider only | `tests/test_gateway.py` |
+| Offline tests | 62 tests plus 6 documented known-false-positive `xfail`s, mock provider only | `tests/test_gateway.py` |
 | Evals | 12 newsroom cases, pass rate / p50 latency / cost per target | `evals/` |
 | Deployment | Docker, compose with Prometheus + Grafana, Kubernetes manifests, GitHub Actions | `Dockerfile`, `docker-compose.yml`, `monitoring/`, `k8s/`, `.github/` |
 
@@ -79,7 +79,7 @@ The response is a normal OpenAI response plus:
             "cost_usd": 0.0, "fallbacks": [], "cached": false, "request_id": "..."}
 ```
 
-`model` accepts `auto`, a route (`simple`, `complex`, `local-only`) or any model name (`local-small`, `claude-smart`, ...). Other endpoints: `GET /v1/usage` (per-team totals, needs a key), `GET /metrics`, `GET /healthz`. Extra request field: `"cache": false` skips the cache.
+`model` accepts `auto`, a route (`simple`, `complex`, `local-only`, `sensitive`) or any model name (`local-small`, `claude-smart`, ...). Other endpoints: `GET /v1/usage` (per-team totals, needs a key), `GET /metrics`, `GET /healthz`. Extra request field: `"cache": false` skips the cache.
 
 ### Use it from the OpenAI SDK
 
@@ -179,12 +179,54 @@ Failed cases and why:
 - **Treat the numbers as indicative only.** There are 12 cases, one run each, and the model is not deterministic: `local-small` passed `doxxing-refusal` when addressed directly but failed it in the `auto` run, with the same model. A 1 to 2 case difference between targets is within that noise.
 - **Local latency was dominated by loading and memory pressure on this machine.** The first local answers took 11 to 47 s; later local answers in the `auto` run took 0.2 to 4.4 s apart from the first one (23 s). The 7.99 s p50 for `local-small` is therefore not representative of a machine with enough free RAM or a GPU. Haiku answered with a p50 of 0.74 s.
 
+### Iteration: routing rules from eval findings
+
+The first auto-router scored 9/12. All three failures came from sending the wrong
+task to the small local model: arithmetic, constrained rewriting, and a request
+that should have been refused. I added routing rules for these cases (with tests,
+including the false positives listed below as strict `xfail`s).
+
+| Version | Pass rate | Cost (12 cases) |
+|---|---|---|
+| auto v1 | 9/12 | $0.0011 |
+| auto v2 (new rules) | 10/12 | $0.0130 |
+| claude-fast only | 10/12 | $0.0042 |
+
+v2 fixed the arithmetic case. The two remaining failures are answer-style issues, not
+routing errors: the doxxing refusal was correct but too long (177 words, limit 120), and
+the neutral rewrite was correct but quoted the removed word and ran to 60 words (limit 40).
+
+**Where the extra cost came from.** Most of the increase is not that many more requests
+were routed to `claude-smart`. It is that Sonnet answered at length on two cases: the
+doxxing refusal ($0.0074) and the neutral rewrite ($0.0037), together about 93% of the
+$0.0119 increase over v1. The calculation case cost $0.0003 and the classification
+that now goes to Sonnet cost $0.0004.
+
+**Known false positives.** The new keyword rules also fire on ordinary short tasks, which
+then go to the expensive model for no benefit. One run showed it: "prosent" in a pasted
+article sent a simple classification (`classify-economy`) to `claude-smart`. Others are
+"3 %" in a headline task, "adressen" in an article, "IP address", "nøytral observatør" and
+"reporter's new address" in a title task. They are recorded as strict `xfail` tests
+(`KNOWN_FALSE_POSITIVES` in `tests/test_gateway.py`) and the rules are deliberately
+unchanged, so the numbers above still apply. Fixing them will make those tests XPASS and fail
+the run, so the markers have to be removed on purpose.
+
+**Sensitive requests fail closed.** Requests that need a safe refusal (home address,
+personnummer, "hvor bor ...") now go to their own route, `sensitive: [claude-smart]`, with
+**no local fallback**. If Claude is down the answer is a 502, never a small local model that
+might comply (in the first run the 3B model did not refuse). The config requires this route to
+exist. The eval results above were measured before this route was added; it uses the same
+model as `complex`'s first choice, so they should be unchanged, but they were not re-run.
+
+Next step: send calculations and rewrites to a cheaper strong model instead, and ask for
+shorter answers. Single run on 12 cases, so the numbers are indicative.
+
 ## Design decisions
 
 - **Heuristic router first.** A handful of regexes on the latest user turn, with a reason in every response, is cheap, explainable and testable. A learned router needs labelled traffic you do not have on day one; the evals tell you when the heuristic is leaving quality or money on the table. It is fallible by design: a pasted article containing the word "plan" will route as complex.
 - **OpenAI-compatible on both sides.** Clients use any OpenAI SDK unchanged; local backends are anything that speaks `/v1/chat/completions`, so Ollama to vLLM or SGLang is a URL change.
 - **Redact only for external providers.** Local models never leave the cluster, so they see the original text and give better answers; anything bound for a hosted API is scrubbed first. The cache key uses the original prompt.
-- **Fail open on models, fail closed on guardrails.** A broken model just moves the request to the next one in the chain; a request that trips a guardrail is rejected, never "best-effort" forwarded.
+- **Fail open on models, fail closed on guardrails.** A broken model just moves the request to the next one in the chain; a request that trips a guardrail is rejected, never "best-effort" forwarded. The `sensitive` route is the exception on the model side: it has a single strong model and no local fallback, so it fails with a 502 rather than falling back.
 - **Bounded metric labels.** Unknown route names are counted under `route="invalid"` so a client cannot create unbounded label values.
 - **Dev keys in config.** API keys live in `config.yaml` for simplicity. For anything real, mount the config from a Secret and rotate the keys. `GET /v1/usage` shows every team's totals to any valid key; restrict that if teams should not see each other's spend.
 

@@ -65,6 +65,10 @@ routes:
   complex: [claude-smart, local-medium]
   # Unpublished articles never leave the cluster: local models only.
   local-only: [local-medium, local-small]
+  # Fail closed: requests that need a safe refusal (e.g. someone's home address)
+  # go to the strong model only. No local fallback: if it is down, the answer is
+  # a 502, never a small local model that might comply.
+  sensitive: [claude-smart]
 
 # --- Auto-router (model: "auto") -----------------------------------------------
 autoroute:
